@@ -1,0 +1,24 @@
+name: fldocvqa
+channels:
+  - pytorch
+  - nvidia
+  - huggingface
+  - conda-forge
+
+dependencies:
+  - python=3.9.13
+  - pytorch::pytorch=1.11.0
+  - pytorch::torchvision=0.12.0
+  - pytorch::torchaudio=0.11.0
+  - cudatoolkit=11.3
+  - pip=22.0.4
+  - pip:
+    - sentencepiece==0.1.96
+    - transformers==4.27.2
+    - timm==0.4.12
+    - editdistance==0.6.0
+    - numpy==1.24.3
+    - scipy==1.11.3
+    - pandas==1.2.1
+    - nvitop
+    - pudb

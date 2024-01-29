@@ -1,0 +1,9 @@
+.ipynb_checkpoints/
+__pycache__/
+core/models/__pycache__/
+core/models/mae/__pycache__/
+core/models/embedding/__pycache__/
+core/models/embedding/relative/__pycache__/
+save/
+mae_ckpt/*
+*.ipynb
