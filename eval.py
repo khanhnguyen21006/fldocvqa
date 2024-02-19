@@ -296,8 +296,8 @@ def main():
     )
     per_dset_scores = save_result(per_dset_scores, metric, args)
     logger.info(
-        f"Metric: {per_dset_scores['metric']:.4f}\t" +\
-        "\t".join([f"{_k}({_v['metric']*100}): {_v['score']}" for _k,_v in per_dset_scores.items() if _k != 'metric'])
+        f"Metric: {per_dset_scores['metric']*100:.4f}\t" +\
+        "\t".join([f"{_k}({_v['metric']}): {_v['score']*100:.4f}" for _k,_v in per_dset_scores.items() if _k != 'metric'])
     )
 
     elapsed = datetime.datetime.now() - dt

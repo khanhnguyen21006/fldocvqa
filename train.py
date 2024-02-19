@@ -14,15 +14,14 @@ from eval import *
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--docvqa', action='store_true', help='docvqa supervised training or self-supervised pre-training.')
-    parser.add_argument('--ssl_task', type=str, default='lm,tm,tlm', help='self supervised pretraining tasks.')
+    parser.add_argument('--docvqa', default=False, action='store_true', help='docvqa supervised training or self pretraining.')
+    parser.add_argument('--ssl_task', type=str, default='lm,tm,tlm', help='self pretraining tasks.')
     parser.add_argument('--lm_prob', type=float, default=0.75, help='masked layout modeling (easy).')
     parser.add_argument('--tm_prob', type=float, default=0.5, help='masked text modeling (medium).')
     parser.add_argument('--tlm_prob', type=float, default=0.15, help='joint text-layout modeling (hard).')
 
     parser.add_argument('--dataset', type=str, default='wtq,docvqa,tabfact', help='ordered by priority, delimited by comma.')
     parser.add_argument('--data_dir', type=str, required=False, default="/data/users/vkhanh/due", help="data directory.")
-    # parser.add_argument('--beta', type=float, default=0.5, help='The parameter for the dirichlet distribution for data partitioning')
 
     parser.add_argument('--model_type', type=str, default='UdopUnimodel', help='model')
     parser.add_argument('--model_name_or_path', type=str, default='t5-base', help='(pretrained) model name/path.')
@@ -44,7 +43,6 @@ def parse_args():
     parser.add_argument('--num_client', type=int, default=3, help='number of clients.')
     parser.add_argument('--num_epoch', type=int, default=1, help='number of local epochs.')
     parser.add_argument('--sample_prob', type=float, default=0.35, help='fraction of clients per round.')
-    # parser.add_argument('--server_momentum', type=float, default=0, help='the server momentum (FedAvgM)')
 
     parser.add_argument('--batch_size', type=int, default=8, help='local training batch size.')
     parser.add_argument('--learning_rate', type=float, default=0.00005, help='local training learning rate.')
@@ -52,6 +50,12 @@ def parse_args():
     parser.add_argument('--warmup_steps', type=int, default=0, help='local training warmup steps.')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='local training weight decay.')
     parser.add_argument('--label_smoothing', type=int, default=0, help='label smoothing.')
+    
+    parser.add_argument('--server_optimizer', type=str, default=None, help='server optimizer') 
+    parser.add_argument('--server_learning_rate', type=float, default=1, help='server learning rate')
+    parser.add_argument('--beta_momentum', type=float, default=0.9, help='server momentum coefficient')
+    parser.add_argument('--beta_rmsprop', type=float, default=0.99, help='server rmsprop coefficient')
+    parser.add_argument('--eps', type=float, default=1e-8, help='server adam epsilon')
 
     parser.add_argument('--num_worker', type=float, default=8, help='dataloader worker.')
     parser.add_argument('--init_seed', type=int, default=0, help="random seed.")
@@ -87,6 +91,8 @@ def verify_args(args):
         if 'lm' in tasks: assert args.lm_prob > 0
         if 'tm' in tasks: assert args.tm_prob > 0
         if 'tlm' in tasks: assert args.tlm_prob > 0
+    if args.server_optimizer:
+        assert args.server_optimizer in ['momentum', 'adam']
 
 def train_local_vqa(model, train_dl, evaluator, tokenizer, logger, args):
     lr, opt, wd = args.learning_rate, args.optimizer, args.weight_decay
@@ -349,10 +355,19 @@ def main():
     #     global_model.load_state_dict(torch.load(args.load_model_file))
     #     num_comm_round -= args.load_model_round
 
-    # if args.server_momentum:
-    #     moment_v = copy.deepcopy(global_model.state_dict())
-    #     for key in moment_v:
-    #         moment_v[key] = 0
+    if args.server_optimizer == 'momentum':
+        lrg, beta1 = args.server_learning_rate, args.beta_momentum
+        moment_v = copy.deepcopy(global_model.state_dict())
+        for key in moment_v:
+            moment_v[key] = 0
+    elif args.server_optimizer == 'adam':
+        lrg, beta1, beta2, eps = args.server_learning_rate, args.beta_momentum, args.beta_rmsprop, args.eps
+        moment_v = copy.deepcopy(global_model.state_dict())
+        for key in moment_v:
+            moment_v[key] = 0
+        rmsprob_v = copy.deepcopy(global_model.state_dict())
+        for key in rmsprob_v:
+            rmsprob_v[key] = 0
 
     if args.eval_start:
         loss, metric, per_dset_scores = evaluate_vqa(global_model, val_dl_global, tokenizer, args, evaluator, logger)
@@ -371,8 +386,8 @@ def main():
             logger.info('*'*10 + f' this round client(s): {curr_round_clients}, data: {curr_round_data} ' + '*'*10)
 
             global_w = global_model.state_dict()
-            # if args.server_momentum:
-            #     old_w = copy.deepcopy(global_model.state_dict())
+            if args.server_optimizer:
+                old_w = copy.deepcopy(global_model.state_dict())
 
             curr_round_models = {_cli: local_models[_cli] for _cli in curr_round_clients}
             for _model in curr_round_models.values():
@@ -390,13 +405,19 @@ def main():
                 else:
                     for _p in _curr_param:
                         global_w[_p] += _curr_param[_p] * agg_w[_w_ind]
-
-            # if args.server_momentum:
-            #     delta_w = copy.deepcopy(global_w)
-            #     for key in delta_w:
-            #         delta_w[key] = old_w[key] - global_w[key]
-            #         moment_v[key] = args.server_momentum * moment_v[key] + (1-args.server_momentum) * delta_w[key]
-            #         global_w[key] = old_w[key] - moment_v[key]
+            if args.server_optimizer == 'momentum':
+                delta_w = copy.deepcopy(global_w)
+                for key in delta_w:
+                    delta_w[key] = old_w[key] - global_w[key]
+                    moment_v[key] = beta1 * moment_v[key] + (1 - beta1) * delta_w[key]
+                    global_w[key] = old_w[key] - lrg * moment_v[key]
+            elif args.server_optimizer == 'adam':
+                delta_w = copy.deepcopy(global_w)
+                for key in delta_w:
+                    delta_w[key] = old_w[key] - global_w[key]
+                    moment_v[key] = beta1 * moment_v[key] + (1 - beta1) * delta_w[key]
+                    rmsprob_v[key] = beta2 * rmsprob_v[key] + (1 - beta1) * delta_w[key]**2
+                    global_w[key] = torch.addcdiv(old_w[key], moment_v[key], torch.add(torch.sqrt(rmsprob_v[key]), eps), value=-lrg)
 
             global_model.load_state_dict(global_w)
 
