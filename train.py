@@ -39,23 +39,23 @@ def parse_args():
     parser.add_argument('--eval_max_len', type=int, default=256, help='max sequence length on decoding.')
 
     parser.add_argument('--algo', type=str, default='fedavg', choices=['fedavg', 'fedprox', 'allin'], help='federated learning algorithm.')
-    parser.add_argument('--num_round', type=int, default=10, help='number of maximum communication rounds.')
-    parser.add_argument('--num_client', type=int, default=3, help='number of clients.')
-    parser.add_argument('--num_epoch', type=int, default=1, help='number of local epochs.')
-    parser.add_argument('--sample_prob', type=float, default=0.35, help='fraction of clients per round.')
+    parser.add_argument('--num_round', type=int, default=10, help='number of maximum communication rounds T.')
+    parser.add_argument('--num_client', type=int, default=3, help='number of clients K.')
+    parser.add_argument('--num_epoch', type=int, default=1, help='number of local epochs E.')
+    parser.add_argument('--sample_prob', type=float, default=0.35, help='fraction of clients per round C.')
 
-    parser.add_argument('--batch_size', type=int, default=8, help='local training batch size.')
-    parser.add_argument('--learning_rate', type=float, default=0.00005, help='local training learning rate.')
-    parser.add_argument('--optimizer', type=str, default='adamw', help='local optimizer.')
+    parser.add_argument('--batch_size', type=int, default=8, help='local training batch size B.')
+    parser.add_argument('--learning_rate', type=float, default=0.00005, help='local training learning rate nl.')
+    parser.add_argument('--optimizer', type=str, default='adamw', help='local optimizer CLIENTOPT.')
     parser.add_argument('--warmup_steps', type=int, default=0, help='local training warmup steps.')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='local training weight decay.')
     parser.add_argument('--label_smoothing', type=int, default=0, help='label smoothing.')
     
-    parser.add_argument('--server_optimizer', type=str, default=None, help='server optimizer') 
-    parser.add_argument('--server_learning_rate', type=float, default=1, help='server learning rate')
-    parser.add_argument('--beta_momentum', type=float, default=0.9, help='server momentum coefficient')
-    parser.add_argument('--beta_rmsprop', type=float, default=0.99, help='server rmsprop coefficient')
-    parser.add_argument('--eps', type=float, default=1e-8, help='server adam epsilon')
+    parser.add_argument('--server_optimizer', type=str, default=None, help='server optimizer SERVEROPT.')
+    parser.add_argument('--server_learning_rate', type=float, default=1, help='server learning rate ns')
+    parser.add_argument('--beta_momentum', type=float, default=0.9, help='server momentum coefficient beta1.')
+    parser.add_argument('--beta_rmsprop', type=float, default=0.99, help='server rmsprop coefficient beta2.')
+    parser.add_argument('--eps', type=float, default=1e-3, help='server adam epsilon e.')
 
     parser.add_argument('--num_worker', type=float, default=8, help='dataloader worker.')
     parser.add_argument('--init_seed', type=int, default=0, help="random seed.")
@@ -92,6 +92,10 @@ def verify_args(args):
         if 'tm' in tasks: assert args.tm_prob > 0
         if 'tlm' in tasks: assert args.tlm_prob > 0
     if args.server_optimizer:
+        """
+            FedAvgM = {'algo': 'fedavg', 'server_optimizer': 'momentum'}
+            FedAdam = {'algo': 'fedavg', 'server_optimizer': 'adam'}
+        """
         assert args.server_optimizer in ['momentum', 'adam']
 
 def train_local_vqa(model, train_dl, evaluator, tokenizer, logger, args):
@@ -350,11 +354,6 @@ def main():
     else:
         round_clients = [all_clients for _ in range(round_start, args.num_round)]
 
-    # num_comm_round = args.comm_round
-    # if args.load_model_file and args.algo != 'plot_visual':
-    #     global_model.load_state_dict(torch.load(args.load_model_file))
-    #     num_comm_round -= args.load_model_round
-
     if args.server_optimizer == 'momentum':
         lrg, beta1 = args.server_learning_rate, args.beta_momentum
         moment_v = copy.deepcopy(global_model.state_dict())
@@ -367,7 +366,7 @@ def main():
             moment_v[key] = 0
         rmsprob_v = copy.deepcopy(global_model.state_dict())
         for key in rmsprob_v:
-            rmsprob_v[key] = 0
+            rmsprob_v[key] = eps**2
 
     if args.eval_start:
         loss, metric, per_dset_scores = evaluate_vqa(global_model, val_dl_global, tokenizer, args, evaluator, logger)
@@ -416,8 +415,8 @@ def main():
                 for key in delta_w:
                     delta_w[key] = old_w[key] - global_w[key]
                     moment_v[key] = beta1 * moment_v[key] + (1 - beta1) * delta_w[key]
-                    rmsprob_v[key] = beta2 * rmsprob_v[key] + (1 - beta1) * delta_w[key]**2
-                    global_w[key] = torch.addcdiv(old_w[key], moment_v[key], torch.add(torch.sqrt(rmsprob_v[key]), eps), value=-lrg)
+                    rmsprob_v[key] = beta2 * rmsprob_v[key] + (1 - beta2) * delta_w[key]**2
+                    global_w[key] = old_w[key] - torch.div(lrg * moment_v[key], torch.add(rmsprob_v[key]**0.5, eps))
 
             global_model.load_state_dict(global_w)
 
