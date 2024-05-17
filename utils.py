@@ -4,112 +4,16 @@ import argparse
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+import seaborn as sns
+# sns.set_style('darkgrid')
 
 import torch
 from torchvision import transforms as t
 
 ########## MISC utils ##########
-def convert_due(dset):
-	from pdf2image import convert_from_path
-
-	DATA_ROOT = "/data/users/vkhanh/due/"
-	dset_dict = {
-		"data_dir": os.path.join(DATA_ROOT, dset)
-	}
-	print(f"READ {dset} DATA from {dset_dict['data_dir']} and convert PDF to PNG 300 dpi...")
-	for _split in ["val", "test", "train"]:
-		print(f"split: {_split}")
-		documents_content = {}
-		saved, broken = 0, 0
-		for jl in tqdm(list(open(os.path.join(dset_dict["data_dir"], _split, "documents_content.jsonl")))):
-			jline = json.loads(jl)
-			try:
-				images = convert_from_path(os.path.join(dset_dict["data_dir"], "pdfs", jline['name'] + '.pdf'), dpi=300)
-				images[0].save(os.path.join(dset_dict["data_dir"], "images", f"{jline['name']}.png"), 'PNG')
-				saved += 1
-			except Exception as e:
-				print(f"{e}, broken file: {os.path.join(dset_dict['data_dir'], 'pdfs', jline['name'])}")
-				broken += 1
-				continue
-			w, h = images[0].size
-			ocr_normalized_boxes = []
-			for _bbox in jline['contents'][0]['tokens_layer']['positions']:
-				_bbn = [
-					_bbox[0]/w, _bbox[1]/h, _bbox[2]/w, _bbox[3]/h  # CORRECT ORDER: left, top, right, bottom
-				]
-				if np.any(np.array(_bbn) > 1):
-					_bbn = np.clip(_bbn, 0, 1).tolist()
-				ocr_normalized_boxes.append(_bbn)
-			documents_content[jline['name']] = {
-				"text": jline['contents'][0]['text'],
-				"ocr_tokens": jline['contents'][0]['tokens_layer']['tokens'],
-				"ocr_boxes": jline['contents'][0]['tokens_layer']['positions'],
-				"ocr_normalized_boxes": ocr_normalized_boxes,
-				"width": w,
-				"height": h,
-			}
-		assert len(documents_content) == saved
-		print(f"{_split} no. broken/saved : {broken}/{saved}")
-		dset_dict[_split] = {
-			"documents_content": documents_content, # list of document content (image name, orc tokens, ...)
-			"document": [json.loads(jl)
-				for jl in list(open(os.path.join(dset_dict["data_dir"], _split, "document.jsonl")))
-			] # list of documents, each contains a lisg of (q,a)s
-		}
-		if _split != "train":
-			with open(os.path.join(dset_dict["data_dir"], _split, 'ssl.json'), 'w') as f:
-				list_docs = []
-				for _k, _v in dset_dict[_split]["documents_content"].items():
-					_v.update({"document_id": _k, "dataset": dset})
-					list_docs.append(_v)
-				json.dump(list_docs, f)
-
-	print("SAVE npy file for Doc VQA task...")
-	for _split in ["val", "test", "train"]:
-		print(f"split: {_split}")
-		records = []
-		for _doc in tqdm(dset_dict[_split]["document"]):
-			for _anno in _doc['annotations']:
-				answers = [_anno['values'][0]['value']]
-				if 'value_variants' in _anno['values'][0]:
-					answers += _anno['values'][0]['value_variants']
-				metadata = {}
-				if 'metadata' in _anno:
-					metadata = _anno['metadata']
-				if 'metadata' in _doc:
-					metadata = _doc['metadata']
-				metadata.update({"dataset": dset, "id": _anno['id']})
-				if _doc['name'] in dset_dict[_split]["documents_content"]:
-					doc_content = dset_dict[_split]["documents_content"][_doc['name']]
-					records.append({
-						"metadata": metadata,
-						"question": _anno['key'],
-						"answers": answers,
-						"image_name": _doc['name'],
-						"image_height": doc_content["height"],
-						"image_width": doc_content["width"],
-						"ocr_tokens": doc_content['ocr_tokens'],
-						"ocr_normalized_boxes": doc_content['ocr_normalized_boxes'],
-					})
-		np.save(open(os.path.join(dset_dict["data_dir"], _split, 'vqa.npy'), 'wb'), np.array(records), allow_pickle=True)
-
-		if _split == "train":
-			doc2inds = {}
-			for _ind, _record in enumerate(records):
-				if _record["image_name"] not in doc2inds:
-					doc2inds[_record["image_name"]] = [_ind]
-				else:
-					doc2inds[_record["image_name"]].append(_ind)
-			assert sum([len(_v) for _v in doc2inds.values()]) == len(records)
-
-			with open(os.path.join(dset_dict["data_dir"], _split, 'ssl.json'), 'w') as f:
-				list_docs = []
-				for _k, _v in dset_dict[_split]["documents_content"].items():
-					_v.update({"document_id": _k, "dataset": dset, "vqa_indices": doc2inds[_k]})
-					list_docs.append(_v)
-				json.dump(list_docs, f)
-
 def get_partition(data_root, dataset, num_client, docvqa):
 	data_dir = os.path.join(data_root, "fldocvqa")
 	DATASETS = [_dset for _dset in dataset.split(',')]
@@ -230,29 +134,215 @@ def count_params(model):
 	num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 	return num_param, num_trainable
 
-def plot_val_curve(expts, labels, title, x='round', y='loss'):
+def plot_single_val_metric_breakdown(expt, title, x='round', ext='png'):
+	"""
+		Plot val metric breakdown for ONE CONFIG (K,C)
+	"""
+	labels, colors, markers = ["wtq", "docvqa", "tabfact"], ['#000093', '#009300', '#930000'], ['X', '^', 'P']
+	ROOT = "save/logs/"
+
+	x_val, vals= [], [[],[],[]]
+	with open(os.path.join(ROOT, expt + ".log")) as f:
+		f = f.readlines()
+	count = 0
+	for _line in f:
+		if "global model" in _line:
+			_y_wtq = re.search(r"wtq\((\d+\.\d+) anls\)", _line).group(1)
+			_y_dv = re.search(r"docvqa\((\d+\.\d+) anls\)", _line).group(1)
+			_y_tf = re.search(r"tabfact\((\d+\.\d+) accuracy\)", _line).group(1)
+			if x == 'round':
+				m = re.search(r'round\[(\d+)\]', _line)
+				_x = m.group(1) if m else count
+				count += 1
+			else:
+				raise "Invalid x"
+			x_val.append(int(_x))
+			vals[0].append(float(_y_wtq))
+			vals[1].append(float(_y_dv))
+			vals[2].append(float(_y_tf))
+	assert len(x_val) == len(vals[0]) == len(vals[1]) == len(vals[2])
+	sns.lineplot(x=x_val, y=vals[0], color=colors[0], marker=markers[0], markersize=8)
+	sns.lineplot(x=x_val, y=vals[1], color=colors[1], marker=markers[1], markersize=8)
+	sns.lineplot(x=x_val, y=vals[2], color=colors[2], marker=markers[2], markersize=8)
+
+	# Add labels and title
+	plt.xticks(np.arange(0, len(x_val), 5))
+
+	# fig.suptitle(title)
+	plt.xlabel('communication round', weight="bold", fontsize=14)
+	plt.ylabel('per-dataset metric', weight="bold", fontsize=14)
+	# Add a legend
+	plt.legend(
+		handles=[Line2D([], [], color=_c, label=_l, marker=_m) for _l,_c,_m in zip(labels, colors, markers)],
+		loc='upper right',
+		# bbox_to_anchor=(1, 1)
+	)
+	plt.tight_layout()
+	plt.savefig(os.path.join(ROOT, "../figures", f"{title.replace(',', ' ').replace(' ', '_')}_breakdown.{ext}"), bbox_inches='tight')
+
+def plot_single_train_curve(expt, clients, title, ext='png'):
+	"""
+		Plot training loss curve for ONE CONFIG (K,C) (multi subplots: each client has one curve)
+		params: title for (K,C)
+	"""
+	ROOT = "save/logs/"
+	K = len(clients); assert K in [3, 10, 30]
+	if K == 3: row=3;col=1;
+	if K == 10: row=10;col=1;
+	if K == 30: row=5;col=6;
+
+	fig, axs = plt.subplots(nrows=row, ncols=col, figsize=(20,12))
+	if col==1: axs = [[_ax] for _ax in axs];
+	x_val, loss_val = [], [[] for _ in range(K)] # met_val = [[] for _ in range(K)]
+	with open(os.path.join(ROOT, expt + ".log")) as f:
+		f = f.readlines()
+
+	start_flag = False
+	curr_step, curr_round, curr_client = 0, 0, 0
+	for _line in f:
+		if "Federated TRAINing Algorithm: FedAvg" in _line and not start_flag:
+			start_flag = True
+			continue
+		if start_flag:
+			_g1 = re.search(r'\*+FL round : (\d+) training client (\d+) \*+', _line)
+			if _g1:
+				curr_round = int(_g1.group(1))
+				curr_client = int(_g1.group(2))
+
+			# _y_met = re.search(r"metric (\d+\.\d+)", _line).group(1)
+			_g2 = re.search(r'\[TRAIN\] Epoch\[\d+\]\[(\d+)\] batch loss: (\d+\.\d+),', _line)
+			if _g2: 
+				curr_step += 1;
+				x_val.append(curr_step)
+				for _k in range(K):
+					if _k == curr_client:
+						loss_val[_k].append(float(_g2.group(2)))
+					else:
+						loss_val[_k].append(0.0) 
+				# met_val.append(float(_y_met))
+	
+	assert not any([len(x_val) != len(loss_val[_k]) for _k in range(K)]) # == len(met_val)
+	for _k in range(K):
+		_i, _j = _k//col, _k%col
+		sns.lineplot(x=x_val, y=loss_val[_k], color='#000093', ax=axs[_i][_j])  #, marker='^', markersize=15
+		# sns.lineplot(x=x_val, y=met_val, color='#000093', marker='^', ax=ax2)  #, markersize=15
+
+		# Add labels and title
+		# axs[_i][_j].set_xticks(np.arange(0, len(x_val), 100))
+		axs[_i][_j].set_xlabel('step', fontsize=12, weight='bold')
+		axs[_i][_j].set_ylabel(f'loss', fontsize=12, weight='bold')
+		axs[_i][_j].set_title(clients[_k], fontsize=12, weight='bold')
+		# ax2.set_xticks(np.arange(0, len(x_val), 5))  #, 5
+		# ax2.set_xlabel('communication round', fontsize=12, weight='bold')
+		# ax2.set_ylabel(f'validation metric', fontsize=12, weight='bold')
+
+	fig.suptitle(title)
+
+	fig.tight_layout()
+	plt.savefig(os.path.join(ROOT, "../figures", f"{title.replace(',', ' ').replace(' ', '_')}.{ext}"), bbox_inches='tight')
+
+def plot_single_val_curve_both(expt, title, x='round', ext='png'):
+	"""
+		Plot val curve for ONE CONFIG (K,C) (2 subplots: 1 for loss, 1 for metric)
+		params: title for (K,C)
+	"""
+	ROOT = "save/logs/"
+
+	fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(8,3.5))
+	x_val, loss_val, met_val = [], [], []
+	with open(os.path.join(ROOT, expt + ".log")) as f:
+		f = f.readlines()
+	count = 0
+	for _line in f:
+		if "global model" in _line:
+			_y_loss = re.search(r"loss (\d+\.\d+)", _line).group(1)
+			_y_met = re.search(r"metric (\d+\.\d+)", _line).group(1)
+			if x == 'round':
+				m = re.search(r'round\[(\d+)\]', _line)
+				_x = m.group(1) if m else count
+				count += 1
+			else:
+				raise "Invalid x"
+			x_val.append(int(_x))
+			loss_val.append(float(_y_loss))
+			met_val.append(float(_y_met))
+	assert len(x_val) == len(loss_val) == len(met_val)
+	sns.lineplot(x=x_val, y=loss_val, color='#000093', marker='^', ax=ax1)  #, markersize=15
+	sns.lineplot(x=x_val, y=met_val, color='#000093', marker='^', ax=ax2)  #, markersize=15
+	ax2.axhline(y=0.5316, linewidth=2, color='orange', ls=':')
+
+	# Add labels and title
+	ax1.set_xticks(np.arange(0, len(x_val), 5))  #, 5
+	ax1.set_xlabel('communication round', fontsize=12, weight='bold')
+	ax1.set_ylabel(f'validation loss', fontsize=12, weight='bold')
+	ax2.set_xticks(np.arange(0, len(x_val), 5))  #, 5
+	ax2.set_xlabel('communication round', fontsize=12, weight='bold')
+	ax2.set_ylabel(f'validation metric', fontsize=12, weight='bold')
+
+	fig.suptitle(title)
+
+	fig.tight_layout()
+	plt.savefig(os.path.join(ROOT, "../figures", f"{title.replace(',', ' ').replace(' ', '_')}.{ext}"), bbox_inches='tight')
+
+	return x_val, loss_val, met_val
+
+def plot_single_val_curve_one_metric(expt, title, metric='loss', x='round', ext='png'):
+	"""
+		Plot val curve for ONE CONFIG (K,C) (1 plots: for loss for metric)
+		params: title for (K,C)
+	"""
+	ROOT = "save/logs/"
+
+	fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(8,3.5))
+	x_val, y_val
+	with open(os.path.join(ROOT, expt + ".log")) as f:
+		f = f.readlines()
+	count = 0
+	for _line in f:
+		if "global model" in _line:
+			if metric == 'loss':
+				_y_val = re.search(r"loss (\d+\.\d+)", _line).group(1)
+			else:
+				_y_val = re.search(r"metric (\d+\.\d+)", _line).group(1)
+			if x == 'round':
+				m = re.search(r'round\[(\d+)\]', _line)
+				_x = m.group(1) if m else count
+				count += 1
+			else:
+				raise "Invalid x"
+			x_val.append(int(_x))
+			y_val.append(float(_y_val))
+	assert len(x_val) == len(y_val)
+	sns.lineplot(x=x_val, y=y_val, color='#000093', marker='^', ax=ax1)  #, markersize=15
+	if metric == 'metric':
+		plt.axhline(y=0.5316, linewidth=2, color='orange', ls=':')
+
+	plt.xticks(np.arange(0, len(x_val), 5))
+	plt.xlabel('communication round', fontsize=12, weight='bold')
+	plt.ylabel(f'validation {metric}', fontsize=12, weight='bold')
+	plt.title(title)
+
+	fig.tight_layout()
+	plt.savefig(os.path.join(ROOT, "../figures", f"{title.replace(',', ' ').replace(' ', '_')}.{ext}"), bbox_inches='tight')
+
+def plot_multi_val_curves_both(expts, labels, colors, markers, title, x='round', ext='png'):
+	"""
+		Plot multiple val curves (2 subplots: 1 for loss, 1 for metric)
+		params: labels, colors, markers for different C
+	"""
 	ROOT = "save/logs/"
 	assert len(expts) == len(labels)
 
-	for _ind, (_expt, _label) in enumerate(zip(expts, labels)):
-		x_val, y_val = [], []
+	fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(8,3.5))
+	for _ind, (_expt, _label, _color, _marker) in enumerate(zip(expts, labels, colors, markers)):
+		x_val, loss_val, met_val = [], [], []
 		with open(os.path.join(ROOT, _expt + ".log")) as f:
 			f = f.readlines()
 		count = 0
 		for _line in f:
 			if "global model" in _line:
-				if y == 'loss':
-					_y = re.search(r"loss (\d+\.\d+)", _line).group(1)
-				elif y == 'wtq':
-					_y = re.search(r"wtq\((\d+\.\d+) anls\)", _line).group(1)
-				elif y == 'docvqa':
-					_y = re.search(r"docvqa\((\d+\.\d+) anls\)", _line).group(1)
-				elif y == 'tabfact':
-					_y = re.search(r"tabfact\((\d+\.\d+) accuracy\)", _line).group(1)
-				elif y == 'metric':
-					_y = re.search(r"metric (\d+\.\d+)", _line).group(1)
-				else:
-					raise "Invalid y"
+				_y_loss = re.search(r"loss (\d+\.\d+)", _line).group(1)
+				_y_met = re.search(r"metric (\d+\.\d+)", _line).group(1)
 				if x == 'round':
 					m = re.search(r'round\[(\d+)\]', _line)
 					_x = m.group(1) if m else count
@@ -260,23 +350,79 @@ def plot_val_curve(expts, labels, title, x='round', y='loss'):
 				else:
 					raise "Invalid x"
 				x_val.append(int(_x))
-				y_val.append(float(_y))
-		if _expt == "fedavg_noniid3_prob07":
-			import pudb; pu.db
-		assert len(x_val) == len(y_val)
-		plt.plot(x_val, y_val, label=_label)  # legend label
+				loss_val.append(float(_y_loss))
+				met_val.append(float(_y_met))
+		assert len(x_val) == len(loss_val) == len(met_val)
+		sns.lineplot(x=x_val, y=loss_val, label=_label, color=_color, marker=_marker, ax=ax1, legend=False)  # legend label
+		sns.lineplot(x=x_val, y=met_val, label=_label, color=_color, marker=_marker, ax=ax2, legend=False)  # legend label
 
 	# Add labels and title
-	plt.xticks(np.arange(len(x_val)))
-	plt.xlabel('communication round')
-	plt.ylabel(f'validation {y}')
-	plt.title(title)
+	ax1.set_xticks(np.arange(0, len(x_val), 5))
+	ax1.set_xlabel('communication round', fontsize=12, weight='bold')
+	ax1.set_ylabel(f'validation loss', fontsize=12, weight='bold')
+	ax2.set_xticks(np.arange(0, len(x_val), 5))
+	ax2.set_xlabel('communication round', fontsize=12, weight='bold')
+	ax2.set_ylabel(f'validation metric', fontsize=12, weight='bold')
+	ax2.axhline(y=0.5316, linewidth=2, color='orange', ls=':')
 
 	# Add a legend
-	plt.legend()
+	fig.legend(
+		handles=[Line2D([], [], color=_c, label=_l, marker=_m) for _l,_c,_m in zip(labels, colors, markers)],
+		loc='upper center',
+		ncol=3,
+		frameon=False,
+		bbox_to_anchor=(0.5,1.05),
+	)
+	fig.tight_layout()
+	plt.savefig(os.path.join(ROOT, "../figures", f"{title.replace(',', ' ')}.{ext}"), bbox_inches='tight')
 
-	plt.savefig(f'{title}.png')
-
+def plot_multi_val_curves_one_metric(expts, labels, colors, markers, title, metric='loss', x='round', ext='png'):
+	"""
+		Plotmultiple  val curves (1 plot for metric(loss or docvqa metric))
+		params: labels, colors, markers
+	"""
+	ROOT = "save/logs/"
+	assert len(expts) == len(labels)
+	
+	for _ind, (_expt, _label, _color, _marker) in enumerate(zip(expts, labels, colors, markers)):
+		x_val, y_val = [], []
+		with open(os.path.join(ROOT, _expt + ".log")) as f:
+			f = f.readlines()
+		count = 0
+		for _line in f:
+			if "global model" in _line:
+				if metric == 'loss':
+					_y_val = re.search(r"loss (\d+\.\d+)", _line).group(1)
+				else:
+					_y_val = re.search(r"metric (\d+\.\d+)", _line).group(1)
+				if x == 'round':
+					m = re.search(r'round\[(\d+)\]', _line)
+					_x = m.group(1) if m else count
+					count += 1
+				else:
+					raise "Invalid x"
+				x_val.append(int(_x))
+				y_val.append(float(_y_val))
+		assert len(x_val) == len(y_val)
+		sns.lineplot(x=x_val, y=y_val, color=colors[_ind], marker=markers[_ind], legend=False)
+		
+	# Add labels and title
+	if metric == 'metric':
+		plt.axhline(y=0.5316, linewidth=2, color='orange', ls=':')
+	plt.xticks(np.arange(0, len(x_val), 5))
+	plt.xlabel('communication round', fontsize=12, weight='bold')
+	plt.ylabel(f'validation {metric}', fontsize=12, weight='bold')
+	plt.title(title)
+	# Add a legend
+	plt.legend(
+		handles=[Line2D([], [], color=_c, label=_l, marker=_m) for _l,_c,_m in zip(labels, colors, markers)],
+		loc='upper right',
+		# ncol=3,
+		frameon=False,
+		# bbox_to_anchor=(0.5,1.05),
+	)
+	plt.tight_layout()
+	plt.savefig(os.path.join(ROOT, "../figures", f"{title.replace(',', ' ')}.{ext}"), bbox_inches='tight')
 
 ########## DATA utils ##########
 def get_image_bbox(im_size=224, p=16):
@@ -376,15 +522,36 @@ def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=-100):
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
-	
+
 	# parser.add_argument('--dataset', type=str, default="docvqa", help='dataset')
 	# parser.add_argument('--num_client', type=int, default=10, help='dataset')
 	# args = parser.parse_args()
 	# dset = args.dataset
 	# n_client = args.num_client
 	# assert dset in DATASETS and n_client > 0
-	# convert_due(dset)
-	# # partition()
-	expts = ['fedavg_noniid3_prob035', 'fedavg_noniid3_prob07', 'fedavg_noniid3_prob1']
-	labels = ['C=0.35', 'C=0.70', 'C=1.00']
-	plot_val_curve(expts, labels, 'non-iid 3 clients, C=[0.35,0.70,1.00]')
+
+	# expts = ['fedadam09ns0001nl000005eps1e8_noniid10_prob035_r10', 'fedadam09ns0001nl000005eps1e8bc_noniid10_prob035_r10'] # 
+	# labels = ['-', 'bias correction'] # 
+	# colors = ['green', 'blue'] # 
+	# markers = ['X', '^'] # 
+	# plot_val_curves(expts, labels, colors, markers, 'val_curve')  #, 'K=3 C=[0.35,0.70,1.00]'
+
+	# expt = 'fedavg_noniid3_prob035'
+	# clients = ['wtq', 'docvqa', 'tabfact']  # clients = ['wtq'] + ['docvqa']*4 + ['tabfact']*5
+	# plot_single_train_curve(expt, clients, 'FedAvg (K3,C0.35,T10)')
+
+	# expt = 'fedavg_noniid3_prob035_r35'
+	# plot_single_val_metric_breakdown(expt, 'FedAvg (K3,C0.35,T35)')
+
+	# expt = 'fedavg_noniid3_prob035_r35'
+	# plot_single_val_curve_both(expt, 'FedAvg (K3,C0.35,T35)')
+
+	expts = [
+		'fedavg_noniid10_sslall_prob035_r35', 
+		'fedadam09ns0001nl000005eps1e8_noniid10_sslall_prob035_r35',
+	] # 
+	labels = ['fedavg', 'fedadam']  # 
+	colors = ['green', 'blue']  # , 'red', 'purple'
+	markers = ['X', '^']  # , 'P', 'o'
+	plot_multi_val_curves_one_metric(expts, labels, colors, markers, 'val_curves_ssl_K10_C035_T35')
+

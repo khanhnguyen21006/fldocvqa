@@ -223,7 +223,8 @@ def parse_args():
     parser.add_argument('--ssl_task', default=None)
 
     parser.add_argument('--dataset', type=str, default='wtq,docvqa,tabfact', help='ordered by priority, delimited by comma.')
-    parser.add_argument('--data_dir', type=str, required=False, default="/data/users/vkhanh/due", help="data directory.")
+    parser.add_argument('--data_dir', type=str, default="/data/users/vkhanh/due", help="data directory.")
+    parser.add_argument('--split', type=str, default="test", choices=['val', 'test'], help="evaluation split.")
 
     parser.add_argument('--model_type', type=str, default='UdopUnimodel', help='model')
     parser.add_argument('--model_name_or_path', type=str, default='t5-base', help='(pretrained) model name/path.')
@@ -256,6 +257,13 @@ def main():
     verify_args(args)
 
     dt = datetime.datetime.now()
+
+    if args.log_file is not None and os.path.exists(args.log_dir(args.log_dir, args.log_file)):
+        try:
+            ver = int(args.log_file.split('_')[-1])
+        except ValueError:
+            ver = 0
+        args.log_file = args.log_file + f"_{str(ver+1)}"
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(
@@ -283,9 +291,9 @@ def main():
     evaluator = Evaluator(case_sensitive=False)
     logger.info(f"Task=docvqa")
 
-    test = json.load(open(os.path.join(args.data_dir, f"fldocvqa/test/{'_'.join(args.dataset.split(','))}_allin.json"), 'r'))
+    test = json.load(open(os.path.join(args.data_dir, f"fldocvqa/{args.split}/{'_'.join(args.dataset.split(','))}_allin.json"), 'r'))
     test_globinds = {int(_k):_v for _k, _v in test["partitions"]["docvqa"].items()}
-    test_dl_global, test_ds = get_dataloader("test", test_globinds[0], args.eval_batch_size, tokenizer, args)
+    test_dl_global, test_ds = get_dataloader(args.split, test_globinds[0], args.eval_batch_size, tokenizer, args)
     logger.info(f"Num TEST global: {len(test_ds)}, TEST steps: {len(test_dl_global)}")
 
     _, metric, per_dset_scores = evaluate_vqa(global_model, test_dl_global, tokenizer, args, evaluator, logger)

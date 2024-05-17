@@ -14,15 +14,18 @@ from eval import *
 def parse_args():
     parser = argparse.ArgumentParser()
 
+    # Task CONFIG
     parser.add_argument('--docvqa', default=False, action='store_true', help='docvqa supervised training or self pretraining.')
-    parser.add_argument('--ssl_task', type=str, default='lm,tm,tlm', help='self pretraining tasks.')
+    parser.add_argument('--ssl_task', type=str, default='lm,tm,tlm', help='self pretraining tasks (lm,tm,tlm).')
     parser.add_argument('--lm_prob', type=float, default=0.75, help='masked layout modeling (easy).')
     parser.add_argument('--tm_prob', type=float, default=0.5, help='masked text modeling (medium).')
     parser.add_argument('--tlm_prob', type=float, default=0.15, help='joint text-layout modeling (hard).')
 
-    parser.add_argument('--dataset', type=str, default='wtq,docvqa,tabfact', help='ordered by priority, delimited by comma.')
+    # Data CONFIG
+    parser.add_argument('--dataset', type=str, default='wtq,docvqa,tabfact', help='ordered by priority (wtq,docvqa,tabfact), delimited by comma.')
     parser.add_argument('--data_dir', type=str, required=False, default="/data/users/vkhanh/due", help="data directory.")
 
+    # Model CONFIG
     parser.add_argument('--model_type', type=str, default='UdopUnimodel', help='model')
     parser.add_argument('--model_name_or_path', type=str, default='t5-base', help='(pretrained) model name/path.')
     parser.add_argument('--config_name', type=str, default=None, help='config name/path if different from model_name.')
@@ -34,29 +37,34 @@ def parse_args():
     parser.add_argument('--image_size', type=int, default=224, help='size of input image.')
     parser.add_argument('--max_source_len', type=int, default=1024, help='maximum text input length.')
     parser.add_argument('--max_target_len', type=int, default=256, help='maximum text output length.')
-    parser.add_argument('--eval_batch_size', type=int, default=32, help="evaluate batch size.")
-    parser.add_argument('--eval_num_beam', type=int, default=1, help='num beams on decoding.')
-    parser.add_argument('--eval_max_len', type=int, default=256, help='max sequence length on decoding.')
 
+    # FL CONFIG
     parser.add_argument('--algo', type=str, default='fedavg', choices=['fedavg', 'fedprox', 'allin'], help='federated learning algorithm.')
     parser.add_argument('--num_round', type=int, default=10, help='number of maximum communication rounds T.')
     parser.add_argument('--num_client', type=int, default=3, help='number of clients K.')
     parser.add_argument('--num_epoch', type=int, default=1, help='number of local epochs E.')
     parser.add_argument('--sample_prob', type=float, default=0.35, help='fraction of clients per round C.')
 
+    # CLIENTOPT CONFIG
     parser.add_argument('--batch_size', type=int, default=8, help='local training batch size B.')
     parser.add_argument('--learning_rate', type=float, default=0.00005, help='local training learning rate nl.')
     parser.add_argument('--optimizer', type=str, default='adamw', help='local optimizer CLIENTOPT.')
     parser.add_argument('--warmup_steps', type=int, default=0, help='local training warmup steps.')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='local training weight decay.')
     parser.add_argument('--label_smoothing', type=int, default=0, help='label smoothing.')
+    parser.add_argument('--eval_batch_size', type=int, default=32, help="evaluate batch size.")
+    parser.add_argument('--eval_num_beam', type=int, default=1, help='num beams on decoding.')
+    parser.add_argument('--eval_max_len', type=int, default=256, help='max sequence length on decoding.')
     
+    # SERVEROPT CONFIG
     parser.add_argument('--server_optimizer', type=str, default=None, help='server optimizer SERVEROPT.')
     parser.add_argument('--server_learning_rate', type=float, default=1, help='server learning rate ns')
     parser.add_argument('--beta_momentum', type=float, default=0.9, help='server momentum coefficient beta1.')
     parser.add_argument('--beta_rmsprop', type=float, default=0.99, help='server rmsprop coefficient beta2.')
     parser.add_argument('--eps', type=float, default=1e-3, help='server adam epsilon e.')
+    parser.add_argument('--bc', default=False, action='store_true', help='bias correction.')
 
+    # MISC
     parser.add_argument('--num_worker', type=float, default=8, help='dataloader worker.')
     parser.add_argument('--init_seed', type=int, default=0, help="random seed.")
     parser.add_argument('--eval_start', default=False, action='store_true', help="evaluation on start.")
@@ -298,6 +306,13 @@ def main():
     verify_args(args)
 
     dt = datetime.datetime.now()
+
+    if args.log_file is not None and os.path.exists(os.path.join(args.log_dir, args.log_file+".log")):
+        try:
+            ver = int(args.log_file.split('_')[-1])
+        except ValueError:
+            ver = 0
+        args.log_file = args.log_file + f"_{str(ver+1)}"
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(
@@ -355,12 +370,12 @@ def main():
         round_clients = [all_clients for _ in range(round_start, args.num_round)]
 
     if args.server_optimizer == 'momentum':
-        lrg, beta1 = args.server_learning_rate, args.beta_momentum
+        lrg, beta1, bc = args.server_learning_rate, args.beta_momentum, args.bc
         moment_v = copy.deepcopy(global_model.state_dict())
         for key in moment_v:
             moment_v[key] = 0
     elif args.server_optimizer == 'adam':
-        lrg, beta1, beta2, eps = args.server_learning_rate, args.beta_momentum, args.beta_rmsprop, args.eps
+        lrg, beta1, beta2, eps, bc = args.server_learning_rate, args.beta_momentum, args.beta_rmsprop, args.eps, args.bc
         moment_v = copy.deepcopy(global_model.state_dict())
         for key in moment_v:
             moment_v[key] = 0
@@ -409,6 +424,10 @@ def main():
                 for key in delta_w:
                     delta_w[key] = old_w[key] - global_w[key]
                     moment_v[key] = beta1 * moment_v[key] + (1 - beta1) * delta_w[key]
+                    if bc:
+                        bias_coeff = 1-beta1**(_round+1)
+                        logger.info(f"[TRAIN] Epoch[{_round}] FedAvgM, bias: {bias_coeff}")
+                        moment_v[key] = torch.div(moment_v[key], bias_coeff)
                     global_w[key] = old_w[key] - lrg * moment_v[key]
             elif args.server_optimizer == 'adam':
                 delta_w = copy.deepcopy(global_w)
@@ -416,6 +435,12 @@ def main():
                     delta_w[key] = old_w[key] - global_w[key]
                     moment_v[key] = beta1 * moment_v[key] + (1 - beta1) * delta_w[key]
                     rmsprob_v[key] = beta2 * rmsprob_v[key] + (1 - beta2) * delta_w[key]**2
+                    if bc:
+                        bias_coeff1 = 1-beta1**(_round+1)
+                        bias_coeff2 = 1-beta2**(_round+1)
+                        logger.info(f"[TRAIN] Epoch[{_round}] FedAdam, bias 1: {bias_coeff1}, bias 2: {bias_coeff2}")
+                        moment_v[key] = torch.div(moment_v[key], bias_coeff1)
+                        rmsprob_v[key] = torch.div(rmsprob_v[key], bias_coeff2)
                     global_w[key] = old_w[key] - torch.div(lrg * moment_v[key], torch.add(rmsprob_v[key]**0.5, eps))
 
             global_model.load_state_dict(global_w)
@@ -433,7 +458,7 @@ def main():
                 valloss = evaluate_ssl(global_model, val_dl_global, args, logger)
                 is_updated = evaluator.update_global_metrics(valloss, _round)
                 logger.info(
-                    f"[VALIDATION] Epoch[{str(_round)}] global model: val loss {valloss:.4f}" +\
+                    f"[VALIDATION] round[{str(_round)}] data{curr_round_data} global model: val loss {valloss:.4f}" +\
                     ("\tBest Performance!" if is_updated else "")
                 )
             save_model(global_model, tokenizer, evaluator, "global", args, _round, update_best=is_updated, keep_prev_round=args.keep_prev_round)

@@ -20,5 +20,5 @@ dependencies:
     - numpy==1.24.3
     - scipy==1.11.3
     - pandas==1.2.1
-    - nvitop
-    - pudb
+    # - nvitop
+    # - pudb
