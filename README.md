@@ -11,7 +11,7 @@ conda activate fldocvqa
 ```
 
 ## Dataset
-We use a data split provided from [Duebenchmark](https://github.com/due-benchmark/baselines). Please follow its procedure to download the data (including the PDFs) and maintain the folder structure for each dataset (named in lowercase) as follows:
+We use a data split provided from [Due](https://github.com/due-benchmark/baselines). Please follow its procedure to download the data (including the PDFs) and maintain the folder structure for each dataset (named in lowercase) as follows:
 ```bash
 └── DATA_ROOT
 	└── docvqa
@@ -38,25 +38,53 @@ python convert_due.py --data_dir /data/to/DATA_ROOT --dataset dataset_name
 ## Federated Training
 The following are the main FL hyperparameters typically considered in all FL algorithms implemented within our framework, using the same notation as in [FedAvg](https://arxiv.org/abs/1602.05629)
 
-| Argument | Values |
+| Argument | Description |
 |------|------|
 | `--algo` | FL algorithm (). |
-| `--num_round` | number of maximum communication rounds T. |
-| `--num_client` | number of participating clients K. |
-| `--num_epoch` | number of local epochs per round E. |
-| `--sample_prob` | random fraction of clients per round C. |
+| `--num_round` | number of maximum communication rounds `T`. |
+| `--num_client` | number of participating clients `K`. |
+| `--num_epoch` | number of local epochs per round `E`. |
+| `--sample_prob` | random fraction of clients per round `C`. |
 
-SERVEROPT
+To enable SERVEROPT/CLIENTOPT training algorithms in your experiments, please set the hyperparamters respectively, as described below:
 
-CLIENTOPT
+| SERVEROPT      | Argument                  | Description/Value      |
+|----------------|---------------------------|------------------------|
+| `FedAvg`       | `--algo`                  | `fedavg`               |
+|----------------|---------------------------|------------------------|
+| `FedAvgM`      | `--algo`                  | `fedavg`               |
+|                | `--server_optimizer`      | `momentum`             |
+|                | `--server_learning_rate`  | Server learning rate   |
+|                | `--beta_momentum`         | Server Momentum coeff. |
+|----------------|---------------------------|------------------------|
+| `FedProx`      | `--algo`                  | `fedprox`               |
+|                | `--server_optimizer`      | `adam`                 |
+|                | `--server_learning_rate`  | Server learning rate   |
+|                | `--beta_momentum`         | Server Momentum coeff. |
+|                | `--beta_rmsprop`          | Server RMSProp coeff.  |
+|                | `--eps`                   | Server Adam epsilon    |
+|                | `--bc`                    | Bias correction        |
+|----------------|---------------------------|------------------------|
+| `FedAdam`      | `--algo`                  | `fedavg`               |
+|                | `--server_optimizer`      | `adam`                 |
+|                | `--server_learning_rate`  | Server learning rate   |
+|                | `--beta_momentum`         | Server Momentum coeff. |
+|                | `--beta_rmsprop`          | Server RMSProp coeff.  |
+|                | `--eps`                   | Server Adam epsilon    |
+|                | `--bc`                    | Bias correction        |
 
-Note the code now is restricted by, we will release another version for a more modular regarding optimization algortim
+| CLIENTOPT      | Argument                  | Description/Value      |
+|----------------|---------------------------|------------------------|
+| `MOON`         | `--algo`                  | `moon`                 |
+|----------------|---------------------------|------------------------|
+
 Please run the `python train.py -h` for more options and details.
+Note that the current implementation of all algorithms is integrated into a single codebase, which is why you see numerous if/else statements. We plan to release a more modular version soon to better separate the algorithms. 
 
 -----------------------------------------------------
 For example, consider a FL setting with `K=10`, `C=0.7`, `T=10`
 
-To pretrain with FPS, run:
+To pretrain with FPS+FedAdam, run:
 ```bash
 python train.py \
 	--ssl_task lm,tm,tlm \
@@ -84,17 +112,18 @@ python train.py \
 ```
 
 ## Evaluation
-The FL evaluation follows the global scheme using shared holdout set located at the server. The metric is compute as
-a two-step average: average the test score on each dataset, and then average per-dataset scores to obtain the final score 
+The FL evaluation follows the global scheme using shared holdout set located at the server. 
+The metric is compute as a two-step average: average the test score on each dataset, and then average per-dataset scores to obtain the final score.
 ```bash
 python eval.py --model_name_or_path /path/to/checkpoint/ --eval_batch_size 32 --log_file log/file/name
 ```
+To reproduce the results reported in the paper, please use the default SEED value.
 
 ## Hyperparameter Tuning
 Hyperparameter optimization in Federated Learning is crucial yet challenging, as it involves numerous hyperparameters and is costly to tune for tasks like DocVQA. The results reported in the paper are not from exhaustive tuning. We welcome feedback if better results are obtained through more thorough tuning strategies.
 
 ## Acknowledgments
-This codebase structure is based from [MOON](https://github.com/QinbinLi/MOON) repos.
+This codebase structure is based from [MOON](https://github.com/QinbinLi/MOON) repo and [UDOP](https://github.com/microsoft/i-Code/tree/main/i-Code-Doc) for the model architecture.
 
 -----------------------------------------------------
 For details of the experiments and results, please refer to our paper. 

@@ -307,12 +307,10 @@ def main():
 
     dt = datetime.datetime.now()
 
-    if args.log_file is not None and os.path.exists(os.path.join(args.log_dir, args.log_file+".log")):
-        try:
-            ver = int(args.log_file.split('_')[-1])
-        except ValueError:
-            ver = 0
-        args.log_file = args.log_file + f"_{str(ver+1)}"
+    if args.log_file is not None:
+        ver = 0
+        while os.path.exists(os.path.join(args.log_dir, args.log_file+".log")):
+            args.log_file = args.log_file + f"_v{str(ver+1)}"
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(
