@@ -404,21 +404,23 @@ def plot_multi_val_curves_one_metric(expts, labels, colors, markers, title, metr
 				x_val.append(int(_x))
 				y_val.append(float(_y_val))
 		assert len(x_val) == len(y_val)
-		sns.lineplot(x=x_val, y=y_val, color=colors[_ind], marker=markers[_ind], legend=False)
+		sns.lineplot(x=x_val, y=y_val, color=colors[_ind], marker=markers[_ind], markersize=15, legend=False)
 		
 	# Add labels and title
 	if metric == 'metric':
 		plt.axhline(y=0.5316, linewidth=2, color='orange', ls=':')
-	plt.xticks(np.arange(0, len(x_val), 5))
+	# plt.xticks(np.arange(0, len(x_val), 5))
+	plt.xticks(np.arange(len(x_val)))
 	plt.xlabel('communication round', fontsize=12, weight='bold')
 	plt.ylabel(f'validation {metric}', fontsize=12, weight='bold')
-	plt.title(title)
+	# plt.title(title)
 	# Add a legend
 	plt.legend(
 		handles=[Line2D([], [], color=_c, label=_l, marker=_m) for _l,_c,_m in zip(labels, colors, markers)],
 		loc='upper right',
 		# ncol=3,
-		frameon=False,
+		fontsize=12,
+		frameon=True,
 		# bbox_to_anchor=(0.5,1.05),
 	)
 	plt.tight_layout()
@@ -547,11 +549,12 @@ if __name__ == '__main__':
 	# plot_single_val_curve_both(expt, 'FedAvg (K3,C0.35,T35)')
 
 	expts = [
-		'fedavg_noniid10_sslall_prob035_r35', 
-		'fedadam09ns0001nl000005eps1e8_noniid10_sslall_prob035_r35',
+		'fedavg_noniid10_sslall_prob07_r10', 
+		'fedavgm09_noniid10_sslall_prob035_r10',
+		'fedadam09_noniid10_sslall_prob07_r10',
 	] # 
-	labels = ['fedavg', 'fedadam']  # 
-	colors = ['green', 'blue']  # , 'red', 'purple'
-	markers = ['X', '^']  # , 'P', 'o'
-	plot_multi_val_curves_one_metric(expts, labels, colors, markers, 'val_curves_ssl_K10_C035_T35')
+	labels = ['FedAvg', 'FedAvgM', 'FedAdam']  # 
+	colors = ['green', 'purple', 'blue']  # , 'red', 'purple'
+	markers = ['X', 'P', '^']  # , 'P', 'o'
+	plot_multi_val_curves_one_metric(expts, labels, colors, markers, 'val_loss_fsp', ext='pdf')
 

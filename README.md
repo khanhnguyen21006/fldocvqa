@@ -36,7 +36,7 @@ python convert_due.py --data_dir /data/to/DATA_ROOT --dataset dataset_name
 ```
 
 ## Federated Training
-The following are the main FL hyperparameters typically considered in all FL algorithms implemented within our framework, using the same notation as in [FedAvg](https://arxiv.org/abs/1602.05629)
+The following are the main FL hyperparameters typically considered in all FL algorithms implemented within our code, using the same notation as in [FedAvg](https://arxiv.org/abs/1602.05629)
 
 | Argument | Description |
 |------|------|
@@ -51,35 +51,27 @@ To enable SERVEROPT/CLIENTOPT training algorithms in your experiments, please se
 | SERVEROPT      | Argument                  | Description/Value      |
 |----------------|---------------------------|------------------------|
 | `FedAvg`       | `--algo`                  | `fedavg`               |
-|----------------|---------------------------|------------------------|
 | `FedAvgM`      | `--algo`                  | `fedavg`               |
 |                | `--server_optimizer`      | `momentum`             |
-|                | `--server_learning_rate`  | Server learning rate   |
-|                | `--beta_momentum`         | Server Momentum coeff. |
-|----------------|---------------------------|------------------------|
-| `FedProx`      | `--algo`                  | `fedprox`               |
-|                | `--server_optimizer`      | `adam`                 |
-|                | `--server_learning_rate`  | Server learning rate   |
-|                | `--beta_momentum`         | Server Momentum coeff. |
-|                | `--beta_rmsprop`          | Server RMSProp coeff.  |
-|                | `--eps`                   | Server Adam epsilon    |
-|                | `--bc`                    | Bias correction        |
-|----------------|---------------------------|------------------------|
+|                | `--server_learning_rate`  | learning rate   |
+|                | `--beta_momentum`         | Momentum coeff. |
 | `FedAdam`      | `--algo`                  | `fedavg`               |
 |                | `--server_optimizer`      | `adam`                 |
-|                | `--server_learning_rate`  | Server learning rate   |
-|                | `--beta_momentum`         | Server Momentum coeff. |
-|                | `--beta_rmsprop`          | Server RMSProp coeff.  |
-|                | `--eps`                   | Server Adam epsilon    |
-|                | `--bc`                    | Bias correction        |
+|                | `--server_learning_rate`  | learning rate   |
+|                | `--beta_momentum`         | Momentum coeff. |
+|                | `--beta_rmsprop`          | RMSProp coeff.  |
+|                | `--eps`                   | Adam epsilon    |
+|                | `--bc`                    | bias correction        |
 
 | CLIENTOPT      | Argument                  | Description/Value      |
 |----------------|---------------------------|------------------------|
-| `MOON`         | `--algo`                  | `moon`                 |
-|----------------|---------------------------|------------------------|
+| `FedProx`      | `--algo`                  | `fedprox`              |
+|                | `--mu`                    | proximal coeff.        |
+| `Scaffold`     | `--algo`                  | `scaffold`             |
 
-Please run the `python train.py -h` for more options and details.
-Note that the current implementation of all algorithms is integrated into a single codebase, which is why you see numerous if/else statements. We plan to release a more modular version soon to better separate the algorithms. 
+
+You can run `python train.py -h` for more options and details.
+Note that the current implementation of all algorithms is integrated into a single codebase, which is why there are quite many if/else statements. We plan to release another version soon to better separate the algorithms. 
 
 -----------------------------------------------------
 For example, consider a FL setting with `K=10`, `C=0.7`, `T=10`
@@ -92,9 +84,9 @@ python train.py \
 	--server_optimizer adam \
 	--server_learning_rate 0.001 \
 	--learning_rate 0.00005 \
-	--eps 1e-8 \
 	--beta_momentum 0.9 \
 	--beta_rmsprop 0.99 \
+	--eps 1e-8 \
 	--num_client 10 \
 	--sample_prob 0.7 \
 	--num_round 10 \

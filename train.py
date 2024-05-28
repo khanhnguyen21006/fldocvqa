@@ -52,9 +52,7 @@ def parse_args():
     parser.add_argument('--warmup_steps', type=int, default=0, help='local training warmup steps.')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='local training weight decay.')
     parser.add_argument('--label_smoothing', type=int, default=0, help='label smoothing.')
-    parser.add_argument('--eval_batch_size', type=int, default=32, help="evaluate batch size.")
-    parser.add_argument('--eval_num_beam', type=int, default=1, help='num beams on decoding.')
-    parser.add_argument('--eval_max_len', type=int, default=256, help='max sequence length on decoding.')
+    parser.add_argument('--mu', type=float, default=1.0, help='proximal term for fedprox.')
     
     # SERVEROPT CONFIG
     parser.add_argument('--server_optimizer', type=str, default=None, help='server optimizer SERVEROPT.')
@@ -68,21 +66,15 @@ def parse_args():
     parser.add_argument('--num_worker', type=float, default=8, help='dataloader worker.')
     parser.add_argument('--init_seed', type=int, default=0, help="random seed.")
     parser.add_argument('--eval_start', default=False, action='store_true', help="evaluation on start.")
+    parser.add_argument('--eval_batch_size', type=int, default=32, help="evaluate batch size.")
+    parser.add_argument('--eval_num_beam', type=int, default=1, help='num beams on decoding.')
+    parser.add_argument('--eval_max_len', type=int, default=256, help='max sequence length on decoding.')
     parser.add_argument('--keep_prev_round', default=False, action='store_true', help="keep all round global checkpoints.")
     parser.add_argument('--save_local_per_round', default=False, action='store_true', help="save local per round.")
     parser.add_argument('--save_final_round', default=False, action='store_true', help="save final round.")
     parser.add_argument('--log_dir', type=str, default="save/logs/", help='log directory.')
     parser.add_argument('--log_file', type=str, default=None, help='log name.')
     parser.add_argument('--ckpt_dir', type=str, default="save/models/", help='model checkpoint directory.')
-
-    # parser.add_argument('--model_buffer_size', type=int, default=1, help='store how many previous models for contrastive loss')
-    # parser.add_argument('--pool_option', type=str, default='FIFO', help='FIFO or BOX')
-    # parser.add_argument('--sample_fraction', type=float, default=1.0, help='how many clients are sampled in each round')
-    # parser.add_argument('--load_model_file', type=str, default=None, help='the model to load as global model')
-    # parser.add_argument('--load_pool_file', type=str, default=None, help='the old model pool path to load')
-    # parser.add_argument('--load_model_round', type=int, default=None, help='how many rounds have executed for the loaded model')
-    # parser.add_argument('--load_first_net', type=int, default=1, help='whether load the first net as old net or not')
-    # parser.add_argument('--normal_model', type=int, default=0, help='use normal model or aggregate model')
 
     args = parser.parse_args()
     return args
@@ -106,11 +98,15 @@ def verify_args(args):
         """
         assert args.server_optimizer in ['momentum', 'adam']
 
-def train_local_vqa(model, train_dl, evaluator, tokenizer, logger, args):
+def train_local_vqa(model, train_dl, evaluator, tokenizer, logger, args, **kwarg):
     lr, opt, wd = args.learning_rate, args.optimizer, args.weight_decay
 
     model = nn.DataParallel(model)
     model.cuda()
+
+    if args.algo == 'fedprox':
+        assert 'global_model' in kwarg and kwarg['global_model'] is not None
+        global_params = list(kwarg['global_model'].cuda().parameters())
 
     if opt == 'adam':
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=wd)
@@ -148,6 +144,12 @@ def train_local_vqa(model, train_dl, evaluator, tokenizer, logger, args):
                 loss, nll_loss = label_smoothed_nll_loss(lprobs, target_ids, args.label_smoothing, ignore_index=-100)
                 loss = output.loss
             # print(f"size: {loss.size()}, mean: {loss.mean()}, sum: {loss.sum()}")
+
+            if args.algo == 'fedprox':
+                prox_term = 0.0
+                for _pind, _p in enumerate(model.parameters()):
+                    prox_term += ((args.mu / 2) * torch.norm((_p - global_params[_pind])) ** 2)
+                loss += prox_term
 
             loss.mean().backward()  # batch average
             optimizer.step()
@@ -209,11 +211,15 @@ def train_local_vqa(model, train_dl, evaluator, tokenizer, logger, args):
 
     return trainscore, trainloss, scores[0]['metric'][0]
 
-def train_local_ssl(model, train_dl, logger, args):
+def train_local_ssl(model, train_dl, logger, args, **kwarg):
     lr, opt, wd = args.learning_rate, args.optimizer, args.weight_decay  # pre-training config might be different
 
     model = nn.DataParallel(model)
     model.cuda()
+
+    if args.algo == 'fedprox':
+        assert 'global_model' in kwarg and kwarg['global_model'] is not None
+        global_params = list(kwarg['global_model'].cuda().parameters())
 
     xent_loss = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -249,6 +255,12 @@ def train_local_ssl(model, train_dl, logger, args):
                 task_loss[_task] += [loss.mean().item()]
             agg_loss = torch.stack(agg_loss).mean()
 
+            if args.algo == 'fedprox':
+                prox_term = 0.0
+                for _pind, _p in enumerate(model.parameters()):
+                    prox_term += ((args.mu / 2) * torch.norm((_p - global_params[_pind])) ** 2)
+                agg_loss += prox_term
+
             agg_loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -271,8 +283,7 @@ def train_local_ssl(model, train_dl, logger, args):
 
     return trainloss
 
-def train_local(models, train_inds, val_inds, tokenizer, logger, args, evaluator=None, fl_round=None):
-    ### global_model=None, prev_model_pool=None, server_c=None, clients_c=None: params for fedprox|moon ###
+def train_local(models, train_inds, val_inds, tokenizer, logger, args, evaluator=None, fl_round=None, global_model=None):
     pc_loss, pc_score = [], []
 
     for _ind, _model in models.items():
@@ -281,11 +292,10 @@ def train_local(models, train_inds, val_inds, tokenizer, logger, args, evaluator
         logger.info(f"Data: {[_k for _k,_v in train_inds[_ind].items() if len(_v) > 0]}" +\
             f", Num TRAIN data: {len(train_dl_local.dataset)}, TRAIN steps: {len(train_dl_local)}"
         )
-        if args.algo in ['fedavg', 'local_training']:
+        if args.algo in ['fedavg', 'fedprox', 'local_training']:
             if args.docvqa:
-                trainloss, trainscore, trainmetric = train_local_vqa(_model, train_dl_local, evaluator, tokenizer, logger, args)
-                pc_loss.append(trainloss)
-                pc_score.append(trainscore)
+                trainloss, trainscore, trainmetric = train_local_vqa(_model, train_dl_local, evaluator, tokenizer, logger, args, global_model=global_model)
+                pc_loss.append(trainloss); pc_score.append(trainscore)
             else:
                 trainloss = train_local_ssl(_model, train_dl_local, logger, args)
                 pc_loss.append(trainloss)
@@ -389,7 +399,7 @@ def main():
             f"breakdown: {breakdown}"
         )
 
-    if args.algo == 'fedavg':
+    if args.algo in ['fedavg', 'fedprox']:
         logger.info(f"Federated TRAINing Algorithm: FedAvg")
         for _round in range(round_start, args.num_round):
             logger.info('='*20 + f" FL round [{str(_round)}]! " + '='*20)
@@ -405,7 +415,7 @@ def main():
             for _model in curr_round_models.values():
                 _model.load_state_dict(global_w)
 
-            train_local(curr_round_models, train_client2inds, val_globinds, tokenizer, logger, args, evaluator=evaluator, fl_round=_round)
+            train_local(curr_round_models, train_client2inds, val_globinds, tokenizer, logger, args, evaluator=evaluator, fl_round=_round, global_model=(global_model if args.algo == 'fedprox' else None))
 
             curr_round_train_total = sum([len(train_client2inds[_cli]) for _cli in curr_round_clients])
             agg_w = [len(train_client2inds[_cli])/curr_round_train_total for _cli in curr_round_clients]
